@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sundarkand Scheduling</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/config.js"></script>
+</head>
+<body>
+<main>
+  <header class="brand"><span class="mark">🪔</span><a href="/">Sundarkand Scheduling</a><span id="userbar"></span></header>
+  <div id="app"><p class="meta">Loading…</p></div>
+</main>
+
+<script type="module">
+import { supabase, requireUser, userBar, esc, fmt, errMsg } from '/lib.js';
+
+const app = document.getElementById('app');
+const MAX = 5, MIN = 2;
+
+const { user, profile } = await requireUser(app, { heading: 'Plan a Sundarkand path' });
+userBar(profile);
+showCreate();
+
+async function showCreate() {
+  app.innerHTML = `
+    <h1>Plan a Sundarkand path</h1>
+    <p class="sub">Propose a few times, share the link, and let everyone pick what works.</p>
+
+    <form id="form" class="card" novalidate>
+      <label for="title">Event title</label>
+      <input id="title" maxlength="120" placeholder="Sundarkand Path at our home" required>
+
+      <label for="location">Location <span class="hint">(optional)</span></label>
+      <input id="location" maxlength="200" placeholder="Address or video link">
+
+      <label for="notes">Notes <span class="hint">(optional)</span></label>
+      <textarea id="notes" maxlength="1000" placeholder="Prasad, what to bring, parking…"></textarea>
+
+      <label>Proposed time slots <span class="hint">(2 to 5)</span></label>
+      <div id="slots"></div>
+      <button type="button" class="ghost" id="addSlot">+ Add another slot</button>
+
+      <div class="actions"><button type="submit" id="submit">Create event</button></div>
+      <div class="error" id="error"></div>
+    </form>
+
+    <div class="card" id="mine" hidden><h2>Your events</h2><div class="list" id="mineList"></div></div>`;
+
+  const slotsEl = document.getElementById('slots');
+  const addBtn = document.getElementById('addSlot');
+  const sync = () => {
+    addBtn.disabled = slotsEl.children.length >= MAX;
+    slotsEl.querySelectorAll('.icon').forEach((b) => (b.disabled = slotsEl.children.length <= MIN));
+  };
+  const addSlot = () => {
+    if (slotsEl.children.length >= MAX) return;
+    const row = document.createElement('div');
+    row.className = 'slot-row';
+    row.innerHTML = `
+      <input type="datetime-local" class="start" aria-label="Date and time">
+      <input class="note" maxlength="120" placeholder="Note (optional)" aria-label="Note">
+      <button type="button" class="icon" aria-label="Remove slot">✕</button>`;
+    row.querySelector('button').onclick = () => { row.remove(); sync(); };
+    slotsEl.appendChild(row);
+    sync();
+  };
+  addBtn.onclick = addSlot;
+  for (let i = 0; i < 4; i++) addSlot();
+
+  document.getElementById('form').onsubmit = async (e) => {
+    e.preventDefault();
+    const err = document.getElementById('error');
+    const btn = document.getElementById('submit');
+    err.textContent = '';
+    const val = (id) => document.getElementById(id).value;
+    const slots = [...slotsEl.children]
+      .map((r) => ({ start: r.querySelector('.start').value, note: r.querySelector('.note').value }))
+      .filter((s) => s.start)
+      .map((s) => ({ starts_at: new Date(s.start).toISOString(), note: s.note }));
+    if (!val('title').trim()) { err.textContent = 'Please give the event a title.'; return; }
+    if (slots.length < MIN) { err.textContent = `Please fill in at least ${MIN} time slots.`; return; }
+
+    btn.disabled = true; btn.textContent = 'Creating…';
+    const { data: id, error } = await supabase.rpc('create_event', {
+      p_title: val('title'), p_location: val('location'), p_notes: val('notes'), p_slots: slots,
+    });
+    btn.disabled = false; btn.textContent = 'Create event';
+    if (error) { err.textContent = errMsg(error); return; }
+    showCreated(id);
+  };
+
+  loadMine();
+}
+
+async function loadMine() {
+  const { data } = await supabase.from('events').select('id,title,created_at,final_slot_id')
+    .eq('host_id', user.id).order('created_at', { ascending: false }).limit(20);
+  if (!data || !data.length) return;
+  document.getElementById('mine').hidden = false;
+  document.getElementById('mineList').innerHTML = data.map((e) => `
+    <a href="/e/${e.id}"><div class="t">${esc(e.title)}</div>
+    <div class="meta">${e.final_slot_id ? 'Time confirmed' : 'Voting open'} · created ${esc(fmt(e.created_at))}</div></a>`).join('');
+}
+
+function showCreated(id) {
+  const link = `${location.origin}/e/${id}`;
+  app.innerHTML = `
+    <h1>Your event is ready 🙏</h1>
+    <p class="sub">Share this link on WhatsApp or by email. People sign in with their email, then vote.</p>
+    <div class="card">
+      <h2>Share link</h2>
+      <div class="linkbox"><input id="shareLink" readonly value="${esc(link)}"><button type="button" id="copy">Copy</button></div>
+      <p class="meta" style="margin-top:14px">You're the host, so when you open the event you'll see a <strong>Confirm</strong> button on each slot.</p>
+      <div class="actions">
+        <a href="/e/${id}"><button type="button">Open event</button></a>
+        <button type="button" class="ghost" id="another">Create another</button>
+      </div>
+    </div>`;
+  document.getElementById('copy').onclick = async (e) => {
+    try { await navigator.clipboard.writeText(link); } catch { document.getElementById('shareLink').select(); document.execCommand('copy'); }
+    e.target.textContent = 'Copied!'; setTimeout(() => (e.target.textContent = 'Copy'), 1500);
+  };
+  document.getElementById('another').onclick = showCreate;
+}
+</script>
+</body>
+</html>

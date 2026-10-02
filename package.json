@@ -1,0 +1,14 @@
+{
+  "name": "sundarkand-scheduling",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Propose time slots for a Sundarkand path and let everyone vote on the one that works.",
+  "scripts": {
+    "dev": "node dev-server.js",
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.2.17"
+  },
+  "license": "MIT"
+}

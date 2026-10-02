@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sundarkand Event</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/config.js"></script>
+</head>
+<body>
+<main>
+  <header class="brand"><span class="mark">🪔</span><a href="/">Sundarkand Scheduling</a><span id="userbar"></span></header>
+  <div id="app"><p class="meta">Loading…</p></div>
+</main>
+
+<script type="module">
+import { supabase, requireUser, userBar, esc, fmt, errMsg } from '/lib.js';
+
+const app = document.getElementById('app');
+const id = new URLSearchParams(location.search).get('id') || location.pathname.split('/').filter(Boolean).pop();
+const isUuid = /^[0-9a-f-]{36}$/i.test(id || '');
+
+const { user, profile } = await requireUser(app, { heading: "You're invited to vote on a Sundarkand time" });
+userBar(profile);
+
+let state = null;
+let busy = false;
+let dirty = false; // unsaved changes in the vote form; pause auto-refresh
+
+async function load() {
+  if (!isUuid) return notFound();
+  const [{ data: event }, { data: slots }, { data: responses }] = await Promise.all([
+    supabase.from('events').select('*').eq('id', id).maybeSingle(),
+    supabase.from('slots').select('*').eq('event_id', id).order('position'),
+    supabase.from('responses').select('*').eq('event_id', id).order('updated_at'),
+  ]);
+  if (!event) return notFound();
+  const ids = [...new Set([event.host_id, ...(responses || []).map((r) => r.user_id)])];
+  const { data: people } = await supabase.from('profiles').select('id,name').in('id', ids);
+  const names = Object.fromEntries((people || []).map((p) => [p.id, p.name]));
+  state = { event, slots: slots || [], responses: responses || [], names };
+  render();
+}
+
+function notFound() {
+  app.innerHTML = '<div class="card"><h1>Event not found</h1><p class="meta">Check the link and try again.</p></div>';
+}
+
+function render() {
+  const { event: e, slots, responses, names } = state;
+  document.title = `${e.title} · Sundarkand`;
+  const isHost = e.host_id === user.id;
+  const tally = Object.fromEntries(slots.map((s) => [s.id, responses.filter((r) => r.choices.includes(s.id)).length]));
+  const top = Math.max(0, ...Object.values(tally));
+  const max = Math.max(1, top);
+  const final = slots.find((s) => s.id === e.final_slot_id);
+  const mine = responses.find((r) => r.user_id === user.id);
+  const voters = responses.filter((r) => !r.declined).length;
+  const declines = responses.length - voters;
+
+  const slotRows = slots.map((s) => {
+    const n = tally[s.id];
+    const checked = mine ? mine.choices.includes(s.id) : false;
+    const isFinal = s.id === e.final_slot_id;
+    const leading = !final && n > 0 && n === top;
+    return `
+      <label class="slot ${checked && !final ? 'selected' : ''} ${isFinal ? 'final' : ''}">
+        ${final ? '' : `<input type="checkbox" name="slot" value="${s.id}" ${checked ? 'checked' : ''}>`}
+        <div class="grow">
+          <div class="when">${esc(fmt(s.starts_at))}
+            ${isFinal ? '<span class="badge good">Confirmed</span>' : leading ? '<span class="badge">Leading</span>' : ''}</div>
+          ${s.note ? `<div class="note">${esc(s.note)}</div>` : ''}
+          <div class="bar"><span style="width:${(n / max) * 100}%"></span></div>
+        </div>
+        <span class="count">${n} vote${n === 1 ? '' : 's'}</span>
+        ${isHost && !final ? `<button type="button" class="ghost" data-finalize="${s.id}">Confirm</button>` : ''}
+      </label>`;
+  }).join('');
+
+  app.innerHTML = `
+    <h1>${esc(e.title)}</h1>
+    <div class="meta" style="margin-bottom:20px">
+      <div>Hosted by <strong>${esc(names[e.host_id] || 'the host')}</strong></div>
+      ${e.location ? `<div>📍 ${esc(e.location)}</div>` : ''}
+      ${e.notes ? `<div style="white-space:pre-wrap;margin-top:6px">${esc(e.notes)}</div>` : ''}
+    </div>
+
+    ${final ? `<div class="success card"><strong>Confirmed:</strong> ${esc(fmt(final.starts_at))}${final.note ? ` · ${esc(final.note)}` : ''}</div>` : ''}
+
+    ${isHost ? `<div class="card"><h2>You're the host</h2>
+      <p class="meta">${final ? 'You confirmed the time above, so voting is closed.' : 'When you are ready, press <strong>Confirm</strong> on a slot to lock in the final time and close voting.'}</p>
+      <div class="actions" style="margin-top:8px">
+        <button type="button" class="ghost" id="copyLink">Copy share link</button>
+        ${final ? '<button type="button" class="ghost" id="reopen">Reopen voting</button>' : ''}
+      </div></div>` : ''}
+
+    <form class="card" id="vote">
+      <h2>${final ? 'Proposed times' : 'Which times work for you?'}</h2>
+      ${final ? '' : `<p class="meta">Voting as <strong>${esc(profile.name)}</strong>. Pick every slot you can make. You can change your answer any time before the host confirms.</p>`}
+      <div id="slots">${slotRows}</div>
+      ${final ? '' : `
+        <label class="decline"><input type="checkbox" id="declined" ${mine && mine.declined ? 'checked' : ''}> I can't make any of these times</label>
+        <label for="comment">Comment <span class="hint">(optional)</span></label>
+        <input id="comment" maxlength="300" value="${esc(mine ? mine.comment : '')}" placeholder="e.g. Can bring prasad">
+        <div class="actions"><button type="submit" id="submit">${mine ? 'Update my response' : 'Submit'}</button></div>
+        <div class="error" id="error"></div>
+        <div class="success" id="ok" hidden style="margin-top:12px"></div>`}
+    </form>
+
+    <div class="card">
+      <h2>Responses <span class="meta">· ${voters} voted${declines ? `, ${declines} declined` : ''}</span></h2>
+      ${responses.length ? `<div class="table-wrap"><table>
+        <thead><tr><th>Name</th>${slots.map((s, i) => `<th title="${esc(fmt(s.starts_at))}">#${i + 1}</th>`).join('')}</tr></thead>
+        <tbody>${responses.map((r) => `<tr>
+          <td>${esc(names[r.user_id] || 'Someone')}${r.user_id === user.id ? ' <span class="meta">(you)</span>' : ''}
+            ${r.comment ? `<div class="meta" style="font-size:.82rem">${esc(r.comment)}</div>` : ''}</td>
+          ${r.declined ? `<td colspan="${slots.length}" class="declined">Can't make it</td>`
+            : slots.map((s) => (r.choices.includes(s.id) ? '<td class="yes">✓</td>' : '<td class="no">–</td>')).join('')}
+        </tr>`).join('')}</tbody></table></div>
+        <p class="meta" style="font-size:.85rem;margin:10px 0 0">${slots.map((s, i) => `#${i + 1} ${esc(fmt(s.starts_at))}`).join(' · ')}</p>`
+        : '<p class="empty">No responses yet. Be the first!</p>'}
+    </div>`;
+  wire();
+}
+
+function wire() {
+  dirty = false;
+  document.getElementById('vote').addEventListener('input', () => (dirty = true));
+  const declined = document.getElementById('declined');
+  const boxes = [...document.querySelectorAll('input[name="slot"]')];
+
+  boxes.forEach((b) => b.addEventListener('change', () => {
+    b.closest('.slot').classList.toggle('selected', b.checked);
+    if (b.checked && declined) declined.checked = false;
+  }));
+  declined?.addEventListener('change', () => {
+    if (declined.checked) boxes.forEach((b) => { b.checked = false; b.closest('.slot').classList.remove('selected'); });
+  });
+
+  if (!state.event.final_slot_id) document.getElementById('vote').onsubmit = async (ev) => {
+    ev.preventDefault();
+    const err = document.getElementById('error');
+    const btn = document.getElementById('submit');
+    err.textContent = '';
+    const choices = boxes.filter((b) => b.checked).map((b) => b.value);
+    if (!declined.checked && !choices.length) { err.textContent = 'Pick at least one slot, or tick "I can\'t make any".'; return; }
+    busy = true; btn.disabled = true;
+    const { error } = await supabase.rpc('submit_response', {
+      p_event_id: id, p_choices: choices, p_declined: declined.checked, p_comment: document.getElementById('comment').value,
+    });
+    busy = false; btn.disabled = false;
+    if (error) { err.textContent = errMsg(error); return; }
+    const wasDecline = declined.checked;
+    await load();
+    const ok = document.getElementById('ok');
+    if (ok) { ok.textContent = wasDecline ? 'Thanks for letting the host know. 🙏' : 'Your vote is saved. Jai Shri Ram! 🙏'; ok.hidden = false; }
+  };
+
+  document.querySelectorAll('[data-finalize]').forEach((b) => b.addEventListener('click', (ev) => {
+    ev.preventDefault(); ev.stopPropagation();
+    if (confirm('Confirm this as the final time? Voting will close.')) finalize(b.dataset.finalize);
+  }));
+  const reopen = document.getElementById('reopen');
+  if (reopen) reopen.onclick = () => finalize(null);
+  const copy = document.getElementById('copyLink');
+  if (copy) copy.onclick = async () => {
+    const link = `${location.origin}/e/${id}`;
+    try { await navigator.clipboard.writeText(link); copy.textContent = 'Copied!'; } catch { prompt('Copy this link:', link); }
+    setTimeout(() => (copy.textContent = 'Copy share link'), 1500);
+  };
+}
+
+async function finalize(slotId) {
+  const { error } = await supabase.rpc('finalize_event', { p_event_id: id, p_slot_id: slotId });
+  if (error) { alert(errMsg(error)); return; }
+  load();
+}
+
+await load();
+// Refresh results every 20s unless the person is mid-edit.
+setInterval(() => { if (!busy && !dirty) load(); }, 20000);
+</script>
+</body>
+</html>
