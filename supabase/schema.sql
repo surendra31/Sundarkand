@@ -19,6 +19,7 @@ create table if not exists public.events (
   final_slot_id  uuid,
   created_at     timestamptz not null default now()
 );
+create index if not exists events_host_idx on public.events (host_id, created_at desc);
 
 create table if not exists public.slots (
   id          uuid primary key default gen_random_uuid(),
@@ -38,6 +39,7 @@ create table if not exists public.responses (
   updated_at  timestamptz not null default now(),
   primary key (event_id, user_id)
 );
+create index if not exists responses_user_idx on public.responses (user_id);
 
 -- ───────────────────────── Row-level security ─────────────────────────
 -- Any signed-in user can read events, slots, responses and names (they need the
